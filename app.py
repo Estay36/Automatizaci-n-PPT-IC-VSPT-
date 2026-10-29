@@ -111,6 +111,16 @@ with st.sidebar:
                  "Botellas finas, …). BLYS mantiene las marcas separadas.")
         fusiones = parsear_fusiones(texto_fus)
 
+    st.header("4 · Trazabilidad")
+    con_traza = st.checkbox(
+        "Generar planilla de trazabilidad (Excel)", value=True,
+        help="Una hoja por gráfico/tabla con los datos y fórmulas que lo originan, más la "
+             "clasificación de cada marca.")
+    con_base = st.checkbox(
+        "Incluir base clasificada en la planilla", value=True, disabled=not con_traza,
+        help="Agrega la base de Megatime con las columnas de clasificación para rehacer "
+             "cualquier cifra con filtros o tablas dinámicas (≈ +4 MB, unos segundos más).")
+
 # --------------------------------------------------------------------------- #
 # Resumen y diagnóstico
 # --------------------------------------------------------------------------- #
@@ -149,18 +159,32 @@ if st.button("Generar PPT", type="primary", disabled=not incluir):
     op = Opciones(fecha_corte=fecha_corte, anio_inicio=anio_inicio,
                   top_grafico=int(top_grafico), top_tabla=int(top_tabla),
                   top_mix=int(top_mix), top_sov=int(top_sov), titulo=titulo)
-    contenido, _, avisos = generar(raw, ag, op, incluir=incluir, targets=targets,
-                                   fusiones=fusiones,
-                                   progreso=lambda p, m: barra.progress(p, m))
-    st.session_state["pptx"] = contenido
-    st.session_state["avisos"] = avisos
-    st.session_state["nombre"] = (f"{fecha_corte:%Y-%m-%d}_Informe_de_Competencia_-_VSPT.pptx")
+    origen = {"Base Megatime": base_file.name,
+              "Agrupaciones": agr_file.name if agr_file else
+              f"{config.AGRUPACIONES_DEFECTO.name} (incluida en el repositorio)"}
+    res = generar(raw, ag, op, incluir=incluir, targets=targets, fusiones=fusiones,
+                  trazabilidad=con_traza, incluir_base=con_base, origen=origen,
+                  progreso=lambda p, m: barra.progress(p, m))
+    prefijo = f"{fecha_corte:%Y-%m-%d}_Informe_de_Competencia_-_VSPT"
+    st.session_state["pptx"] = res.pptx
+    st.session_state["xlsx"] = res.xlsx
+    st.session_state["avisos"] = res.avisos
+    st.session_state["prefijo"] = prefijo
 
 if "pptx" in st.session_state:
     st.success("Informe generado.")
-    st.download_button("Descargar PPT", st.session_state["pptx"],
-                       file_name=st.session_state["nombre"],
+    b1, b2, _ = st.columns([1, 1.4, 2])
+    b1.download_button("Descargar PPT", st.session_state["pptx"],
+                       file_name=f"{st.session_state['prefijo']}.pptx", type="primary",
                        mime="application/vnd.openxmlformats-officedocument."
                             "presentationml.presentation")
+    if st.session_state.get("xlsx"):
+        b2.download_button("Descargar planilla de trazabilidad", st.session_state["xlsx"],
+                           file_name=f"{st.session_state['prefijo']}_trazabilidad.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument."
+                                "spreadsheetml.sheet")
+        st.caption("La planilla tiene una hoja por diapositiva (mismo número que en el PPT) "
+                   "con los datos de origen, la agrupación en OTRAS y fórmulas que "
+                   "reconstruyen cada cifra. Empieza por la hoja «LEEME».")
     for aviso in st.session_state.get("avisos", []):
         st.caption(f"ℹ️ {aviso}")

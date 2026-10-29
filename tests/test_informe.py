@@ -8,6 +8,7 @@ import io
 import itertools
 from datetime import date
 
+import openpyxl
 import pandas as pd
 import pytest
 from pptx import Presentation
@@ -102,10 +103,42 @@ def test_clasificacion(base, agrupaciones):
 
 
 def test_genera_pptx(base, agrupaciones):
-    contenido, _, avisos = generar(base, agrupaciones, Opciones(fecha_corte=date(2026, 10, 2)))
-    prs = Presentation(io.BytesIO(contenido))
+    res = generar(base, agrupaciones, Opciones(fecha_corte=date(2026, 10, 2)),
+                  trazabilidad=False)
+    assert res.xlsx is None
+    prs = Presentation(io.BytesIO(res.pptx))
     assert len(prs.slides) > 40
     titulos = [s.shapes.title.text_frame.text for s in prs.slides
                if s.shapes.title is not None]
     assert any(t.startswith("INVERSIONES Y SOS POR COMPAÑÍA") for t in titulos)
     assert any(t.startswith("SOS VS SOV") for t in titulos)
+
+
+def test_trazabilidad_cuadra_con_pptx(base, agrupaciones):
+    """Cada diapositiva con datos tiene su hoja y la numeración calza con el PPT."""
+    res = generar(base, agrupaciones, Opciones(fecha_corte=date(2026, 10, 2)),
+                  incluir_base=True)
+    prs = Presentation(io.BytesIO(res.pptx))
+    wb = openpyxl.load_workbook(io.BytesIO(res.xlsx))
+    assert {"LEEME", "Índice", "Clasificación", "Diagnóstico", "Base"} <= set(wb.sheetnames)
+    indice = wb["Índice"]
+    filas = [r for r in indice.iter_rows(min_row=4, values_only=True) if isinstance(r[0], int)]
+    assert len(filas) == len(prs.slides)  # una fila por diapositiva
+    for n, _sec, tipo, titulo, *_resto, hoja in filas:
+        slide = prs.slides[n - 1]
+        if hoja not in (None, "—"):
+            assert hoja in wb.sheetnames
+            assert slide.shapes.title.text_frame.text.startswith(titulo)
+    # La tabla A de "Inversión por compañía" suma lo mismo que la base para YTD actual.
+    hoja = wb[next(s for s in wb.sheetnames if s.endswith("Compañía Inv"))]
+    filas_h = list(hoja.iter_rows(values_only=True))
+    i_enc = next(i for i, r in enumerate(filas_h) if r[0] == "Entidad")
+    col = filas_h[i_enc].index("YTD 2026")
+    suma = 0.0
+    for r in filas_h[i_enc + 1:]:
+        if r[0] is None:
+            break
+        suma += r[col] or 0
+    esperado = base[base["Área"].isin(config.AREAS_VINO) & (base["Año"] == 2026)][
+        "ValorPublico"].sum()
+    assert suma == pytest.approx(esperado)

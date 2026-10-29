@@ -13,7 +13,28 @@ de PowerPoint (editables, con su planilla de datos).
 3. Revisar la fecha de corte (se lee del nombre del archivo, p. ej. `02oct2026`), las
    secciones, el número de marcas por gráfico y el target de TRP de cada sección.
 4. Revisar el **Diagnóstico de agrupaciones**: muestra las marcas que no calzan con la hoja.
-5. *Generar PPT* → *Descargar PPT*.
+5. *Generar PPT* → *Descargar PPT* y *Descargar planilla de trazabilidad*.
+
+## Planilla de trazabilidad
+
+Además del PPT, la app genera un Excel para verificar de dónde sale cada gráfico:
+
+| Hoja | Contenido |
+|---|---|
+| **LEEME** | Parámetros de la corrida (archivos, fecha de corte, top-N, targets, fusiones) y definiciones (TT, YTD, SOS, SOV, OTRAS, medios). |
+| **Índice** | Una fila por diapositiva, con el mismo número que en el PPT, y vínculo a su hoja. |
+| **Dnn …** | Una hoja por gráfico o tabla (p. ej. `D24 BFinas Inv` = diapositiva 24). Arriba: universo, métrica, unidad, cálculo y cómo reproducirlo. Abajo: **A** detalle por entidad en pesos/TRPs y con qué serie se muestra (su nombre u OTRAS); **B** datos del gráfico como fórmulas `SUMAR.SI` sobre A; **C** participaciones con fórmulas sobre B. Las tablas mensuales incluyen el cálculo de la fila «Var.% año anterior». |
+| **Clasificación** | Cada marca × área × empresa con compañía, categoría, marca del informe, BLYS y la regla aplicada. |
+| **Diagnóstico** | Marcas que no calzan con la hoja Agrupaciones. |
+| **Base** | (Opcional) La base de Megatime con las columnas de clasificación, como tabla de Excel para filtrar o hacer tablas dinámicas. |
+
+## Actualizar la app en GitHub
+
+Streamlit Cloud vuelve a desplegar sola cada vez que cambia el repositorio. Para subir
+cambios por la web de GitHub: **Add file → Upload files** y arrastrar los archivos o
+carpetas modificados **manteniendo la misma estructura**. Un archivo con el mismo nombre
+y ubicación reemplaza al anterior; los que no se suben quedan intactos. Si cambia
+`requirements.txt`, el primer arranque tarda un par de minutos más (instala dependencias).
 
 ## Estructura del informe (hoja «Informe»)
 
@@ -82,6 +103,7 @@ informe/metricas.py        Agregaciones (por periodo, mensual, mix, SOS vs SOV, 
 informe/pptx_utils.py      Plantilla, gráficos nativos y tablas (python-pptx)
 informe/diapositivas.py    Un constructor por tipo de diapositiva
 informe/reporte.py         Secciones del informe y orquestación
+informe/trazabilidad.py    Planilla Excel de trazabilidad
 assets/plantilla.pptx      Diseños corporativos (sin diapositivas)
 assets/colores.json        Color fijo por marca, compañía, categoría y medio
 assets/Categorias_Vinos.xlsx  Agrupaciones por defecto

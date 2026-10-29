@@ -81,6 +81,8 @@ class Diagnostico:
     compania_por_respaldo: pd.DataFrame
     blys_no_listadas: pd.DataFrame
     medios_sin_mapeo: list[str]
+    # Una fila por (marca, área, empresa) con el resultado y la regla aplicada.
+    clasificacion: pd.DataFrame | None = None
 
 
 def _tabla_diag(df: pd.DataFrame, mask: pd.Series, cols: list[str]) -> pd.DataFrame:
@@ -90,6 +92,25 @@ def _tabla_diag(df: pd.DataFrame, mask: pd.Series, cols: list[str]) -> pd.DataFr
          .sort_values("inv", ascending=False))
     t["Inversión (MM$)"] = (t.pop("inv") / 1e6).round(1)
     return t.reset_index(drop=True)
+
+
+def _tabla_clasificacion(df: pd.DataFrame, mapa: pd.DataFrame) -> pd.DataFrame:
+    """Resultado de la clasificación por combinación, con inversión y TRPs totales."""
+    claves = [config.COL_MARCA, config.COL_AREA, config.COL_EMPRESA]
+    trp = [t for t in config.TARGETS_TRP if t in df.columns]
+    tot = df.groupby(claves).agg(
+        **{"Inversión total (CLP)": ("inv", "sum"), "Años": (config.COL_ANIO, "unique")},
+        **{f"TRP {config.TARGETS_TRP[t]}": (t, "sum") for t in trp}).reset_index()
+    tot["Años"] = tot["Años"].map(lambda a: ", ".join(str(x) for x in sorted(a)))
+    t = mapa.merge(tot, on=claves, how="left")
+    es_vino = t[config.COL_AREA].isin(config.AREAS_VINO)
+    t.loc[~es_vino, ["compania", "categoria", "regla_compania", "regla_categoria"]] = (
+        "— (fuera del universo vinos)")
+    cols = claves + ["compania", "regla_compania", "categoria", "regla_categoria", "marca",
+                     "marca_blys", "blys_vinos", "blys_total", "regla_blys",
+                     "Inversión total (CLP)"] + [f"TRP {config.TARGETS_TRP[x]}" for x in trp] + ["Años"]
+    return (t[cols].sort_values([config.COL_AREA, "Inversión total (CLP)"],
+                                ascending=[True, False]).reset_index(drop=True))
 
 
 def clasificar(df: pd.DataFrame, ag: Agrupaciones,
@@ -113,19 +134,31 @@ def clasificar(df: pd.DataFrame, ag: Agrupaciones,
         # Compañía
         comp = ag.compania_de_marca(km)
         comp_resp = comp is None
+        regla_comp = "Marca en lista de la compañía (hoja Agrupaciones)"
         if comp is None:
             comp = emp_a_comp.get(clave(emp), config.COMPANIA_OTRAS)
+            if comp != config.COMPANIA_OTRAS:
+                regla_comp = "Marca no listada: se asigna por empresa"
+            elif clave(emp) in ag.empresas_otras:
+                regla_comp = "Empresa en lista OTRAS VIÑAS"
+            else:
+                regla_comp = "Sin lista ni empresa conocida: OTRAS VIÑAS"
         # Categoría
         natural = config.AREA_A_CATEGORIA.get(ar)
         cands = ag.categorias_de(km)
         if natural in cands:
             cat = natural
+            regla_cat = ("Marca en lista de la categoría" if len(cands) == 1 else
+                         f"Marca en {len(cands)} listas: desempata el área")
         elif len(cands) == 1:
             cat = cands[0]
+            regla_cat = "Marca en una sola lista (distinta a la de su área)"
         elif cands:
             cat = next(c for c in config.ORDEN_CATEGORIAS if c in cands)
+            regla_cat = "Marca en varias listas, ninguna de su área: primera en orden"
         else:
             cat = natural
+            regla_cat = "Marca no listada: categoría natural del área"
         # BLYS
         nombre_blys = config.MARCA_POR_AREA.get((marca.upper(), ar), marca.upper())
         kb = alias.get(clave(nombre_blys), clave(nombre_blys))
@@ -137,6 +170,14 @@ def clasificar(df: pd.DataFrame, ag: Agrupaciones,
         en_total = en_vinos or kb in ag.blys_total or (
             not mencionada and ar in config.AREAS_BLYS_TOTAL)
         listada = mencionada
+        if kb in ag.blys_futuro:
+            regla_blys = "En «Tentativo incluir a futuro»: excluida"
+        elif mencionada:
+            regla_blys = "Marca en lista BLYS de la hoja"
+        elif en_total:
+            regla_blys = "No listada; incluida por área BLYS"
+        else:
+            regla_blys = "No es BLYS"
         filas.append({
             config.COL_MARCA: marca, config.COL_AREA: ar, config.COL_EMPRESA: emp,
             "compania": comp, "_comp_resp": comp_resp,
@@ -145,9 +186,12 @@ def clasificar(df: pd.DataFrame, ag: Agrupaciones,
             "marca_blys": nombre_blys,
             "blys_vinos": en_vinos, "blys_total": en_total,
             "_blys_no_listada": (en_total and not listada),
+            "regla_compania": regla_comp, "regla_categoria": regla_cat,
+            "regla_blys": regla_blys,
         })
     mapa = pd.DataFrame(filas)
-    df = df.merge(mapa, on=[config.COL_MARCA, config.COL_AREA, config.COL_EMPRESA],
+    reglas = ["regla_compania", "regla_categoria", "regla_blys"]
+    df = df.merge(mapa.drop(columns=reglas), on=[config.COL_MARCA, config.COL_AREA, config.COL_EMPRESA],
                   how="left", validate="many_to_one")
     df.loc[~df["es_vino"], ["categoria", "compania"]] = None
 
@@ -160,6 +204,7 @@ def clasificar(df: pd.DataFrame, ag: Agrupaciones,
         blys_no_listadas=_tabla_diag(df, df["_blys_no_listada"],
                                      ["marca_blys", config.COL_AREA]),
         medios_sin_mapeo=sorted(df.loc[df["medio_grp"].isna(), config.COL_MEDIO].unique()),
+        clasificacion=_tabla_clasificacion(df, mapa),
     )
     df["medio_grp"] = df["medio_grp"].fillna("Internet")
     return df.drop(columns=[c for c in df.columns if c.startswith("_")]), diag

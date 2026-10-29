@@ -21,6 +21,7 @@ from .pptx_utils import (ALTO, ANCHO, X0, Y0, Colores, Deck, caja_texto,
                          poner_titulo)
 from .pptx_utils import BloqueTabla
 from .pptx_utils import tabla_mensual as dibujar_tabla_mensual
+from .trazabilidad import Bloque, Entrada, Trazabilidad, Variacion
 
 
 # --------------------------------------------------------------------------- #
@@ -37,6 +38,7 @@ class Seccion:
     target: str = config.TARGET_DEFECTO
     orden_fijo: list[str] | None = None
     separador: str | None = None  # texto del separador (por defecto ``nombre``)
+    universo: str = ""            # filtro en palabras, para la trazabilidad
 
 
 @dataclass
@@ -57,6 +59,36 @@ class Contexto:
     colores: Colores
     op: Opciones
     avisos: list[str] = field(default_factory=list)
+    traza: Trazabilidad | None = None
+
+
+# --------------------------------------------------------------------------- #
+# Trazabilidad
+# --------------------------------------------------------------------------- #
+def _registrar(ctx: Contexto, deck: Deck, sec: Seccion, tipo: str, titulo: str,
+               subtitulo: str, **kw) -> None:
+    """Deja constancia de los datos de la diapositiva recién creada."""
+    if ctx.traza is None:
+        return
+    ctx.traza.registrar(Entrada(n=len(deck.prs.slides), seccion=sec.nombre, tipo=tipo,
+                                titulo=titulo, subtitulo=subtitulo, universo=sec.universo,
+                                **kw))
+
+
+def _asignacion(entidades, visibles) -> dict[str, str]:
+    visibles = set(visibles)
+    return {e: (e if e in visibles else config.OTRAS) for e in entidades}
+
+
+def _regla_series(sec: Seccion, n: int, criterio: str) -> str:
+    if sec.orden_fijo is not None:
+        return "Series: todas las entidades, en orden fijo."
+    return f"Series: top {n} {criterio}; el resto se suma en OTRAS."
+
+
+def _texto_periodos(per: Periodos) -> str:
+    return (f"TT AAAA: Año = AAAA. YTD {per.anio_anterior}: Año = {per.anio_anterior} y "
+            f"ytd = VERDADERO. YTD {per.anio_actual}: Año = {per.anio_actual}.")
 
 
 # --------------------------------------------------------------------------- #
@@ -168,6 +200,23 @@ def por_periodo(deck: Deck, ctx: Contexto, sec: Seccion, df: pd.DataFrame,
         formato_etiqueta="0%", formato_valor="0%", leyenda=False,
         trazado=(0.07, 0.06, 0.90, 0.70), **kw)
     poner_fuente(s, _fuente_trp(sec) if es_trp else config.FUENTE_MILLONES)
+    metrica_txt = "SOV" if es_trp else "SOS"
+    _registrar(
+        ctx, deck, sec, "TRP y SOV" if es_trp else "Inversión y SOS", titulo,
+        _sub(sec, rango(ctx.per, ctx.per.anio_inicio)),
+        metrica=(f"{sec.target} ({config.TARGETS_TRP.get(sec.target, '')})" if es_trp
+                 else config.COL_VALOR),
+        unidad_ppt=("TRPs (gráfico izquierdo) y SOV % (derecho)" if es_trp else
+                    "Millones de pesos = valor / 1.000.000 (izquierdo) y SOS % (derecho)"),
+        calculo=(f"Suma por periodo y serie. {metrica_txt} = valor de la serie / total del "
+                 f"periodo. " + _regla_series(sec, ctx.op.top_grafico,
+                                              "por SOS ponderado entre periodos")),
+        reproducir=(f"Filtrar {sec.universo}{' y es_tv = VERDADERO' if es_trp else ''}. "
+                    f"{_texto_periodos(ctx.per)} Sumar {valor if es_trp else config.COL_VALOR} "
+                    f"por «{sec.dim}»."),
+        bloques=[Bloque("Valores por periodo", tabla.T, entidades,
+                        _asignacion(tabla.columns, entidades),
+                        "TRP" if es_trp else "CLP", "columna")])
 
 
 # --------------------------------------------------------------------------- #
@@ -216,6 +265,31 @@ def tabla_mensual(deck: Deck, ctx: Contexto, sec: Seccion, df: pd.DataFrame,
                           etiqueta_share=etiqueta, variacion=var.tolist(),
                           variacion_total=var_tot, alto_separador=sep, tam=tam)
     poner_fuente(s, _fuente_trp(sec) if es_trp else config.FUENTE_MILES)
+    if ctx.traza is not None:
+        unidad = "TRP" if es_trp else "CLP"
+        bloques_t = []
+        for b in bloques:
+            det = metricas.detalle_mensual(base, b.anio, sec.dim, valor).T
+            bloques_t.append(Bloque(
+                f"Año {b.anio}", det, list(b.valores.index),
+                _asignacion(det.index, b.valores.index), unidad, "total",
+                etiquetas_columnas=list(config.MESES_CORTOS)))
+        comp, act_tot, base_tot = metricas.componentes_variacion(base, ctx.per, valor)
+        _registrar(
+            ctx, deck, sec, "TRP mensual" if es_trp else "Inversión mensual", titulo,
+            _sub(sec, rango(ctx.per, ctx.per.anio_anterior)),
+            metrica=(f"{sec.target} ({config.TARGETS_TRP.get(sec.target, '')})" if es_trp
+                     else config.COL_VALOR),
+            unidad_ppt="TRPs" if es_trp else "Miles de pesos = valor / 1.000",
+            calculo=(f"Suma por mes y serie. {etiqueta} = total anual de la serie / total del "
+                     f"año. " + _regla_series(sec, ctx.op.top_tabla,
+                                              "por inversión del año (cada año por separado)")),
+            reproducir=(f"Filtrar {sec.universo}{' y es_tv = VERDADERO' if es_trp else ''} y "
+                        f"Año. Sumar {valor if es_trp else config.COL_VALOR} por «{sec.dim}» "
+                        f"y Mes."),
+            bloques=bloques_t,
+            variacion=Variacion(comp, act_tot, base_tot, ctx.per.anio_actual,
+                                ctx.per.anio_anterior, unidad))
 
 
 # --------------------------------------------------------------------------- #
@@ -250,6 +324,22 @@ def sos_mensual(deck: Deck, ctx: Contexto, sec: Seccion, df: pd.DataFrame) -> No
         rot_categorias=-45, trazado=(0.05, 0.12, 0.93, 0.66),
         titulo_valor="SOS (miles de pesos sobre cada columna)")
     poner_fuente(s, config.FUENTE_MILES)
+    if ctx.traza is not None:
+        det = metricas.detalle_share_mensual(df, ctx.per, sec.dim, "inv").T
+        _registrar(
+            ctx, deck, sec, "SOS mensual",
+            "SOS MENSUALES POR MARCA" if sec.entidad == "MARCA"
+            else f"SOS MENSUALES POR {sec.entidad}",
+            _sub(sec, rango(ctx.per, ctx.per.anio_anterior)),
+            metrica=config.COL_VALOR,
+            unidad_ppt="SOS % por columna; sobre cada columna, total en miles de pesos",
+            calculo=("Suma por mes y serie; SOS = valor de la serie / total del mes. Las dos "
+                     "últimas columnas son YTD. " + _regla_series(
+                         sec, ctx.op.top_grafico, "(unión de los top de cada YTD)")),
+            reproducir=(f"Filtrar {sec.universo}. Meses: Año y Mes. "
+                        f"{_texto_periodos(ctx.per)} Sumar {config.COL_VALOR} por «{sec.dim}»."),
+            bloques=[Bloque("Valores por mes y YTD", det, entidades,
+                            _asignacion(det.index, entidades), "CLP", "columna")])
 
 
 # --------------------------------------------------------------------------- #
@@ -285,6 +375,28 @@ def mix_medios(deck: Deck, ctx: Contexto, sec: Seccion, df: pd.DataFrame) -> Non
         rot_categorias=-45 if len(t) > 9 else 0, rot_totales=-90 if len(t) > 14 else 0,
         trazado=(0.05, 0.10, 0.93, 0.66))
     poner_fuente(s, config.FUENTE_MILLONES)
+    if ctx.traza is not None:
+        detalles = metricas.detalle_mix(df, ctx.per, sec.dim)
+        bloques_t = []
+        for b in bloques:
+            visibles = [e for e in b.shares.index if e != b.etiqueta]
+            det = detalles[b.etiqueta]
+            bloques_t.append(Bloque(
+                b.etiqueta, det, visibles, _asignacion(det.index, visibles), "CLP", "fila",
+                etiqueta_total=b.etiqueta,
+                nota=f"La fila «{b.etiqueta}» es la última barra del bloque en el gráfico."))
+        _registrar(
+            ctx, deck, sec, "Mix de medios", "MIX DE MEDIOS",
+            _sub(sec, f"TT {ctx.per.anio_anterior} Y {rango(ctx.per)}"),
+            metrica=f"{config.COL_VALOR} por medio_grp",
+            unidad_ppt="% por medio en cada barra; sobre cada barra, total en millones de pesos",
+            calculo=("Suma por serie y medio; % = valor del medio / total de la serie. "
+                     + _regla_series(sec, ctx.op.top_mix, "por inversión del periodo")),
+            reproducir=(f"Filtrar {sec.universo}. TT {ctx.per.anio_anterior}: Año = "
+                        f"{ctx.per.anio_anterior}. YTD {ctx.per.anio_actual}: Año = "
+                        f"{ctx.per.anio_actual}. Sumar {config.COL_VALOR} por «{sec.dim}» "
+                        f"y «medio_grp»."),
+            bloques=bloques_t)
 
 
 # --------------------------------------------------------------------------- #
@@ -310,3 +422,25 @@ def sos_vs_sov(deck: Deck, ctx: Contexto, sec: Seccion, df: pd.DataFrame) -> Non
                "Anillo interior: SOS (inversión en TV)  ·  Anillo exterior: SOV (TRPs)",
                tam=11, color="595959", nombre="Nota anillos")
     poner_fuente(s, _fuente_trp(sec))
+    if ctx.traza is not None:
+        det = metricas.detalle_sos_sov(df, ctx.per, sec.dim, sec.target)
+        asig = _asignacion(det.index, r.entidades)
+        _registrar(
+            ctx, deck, sec, "SOS vs SOV", "SOS VS SOV", _sub(sec, rango(ctx.per)),
+            metrica=(f"{config.COL_VALOR} (anillo interior) y {sec.target} "
+                     f"({config.TARGETS_TRP.get(sec.target, '')}, anillo exterior)"),
+            unidad_ppt="% de cada anillo; arriba, TRPs y pesos totales",
+            calculo=("Año actual, solo TV abierta y pagada. SOS = inversión en TV de la serie / "
+                     "total; SOV = TRPs de la serie / total. " + (
+                         "Series: todas, en orden fijo." if sec.orden_fijo is not None else
+                         f"Series: top {ctx.op.top_sov} por TRPs (solo quienes tienen TRPs); "
+                         "el resto de la inversión en TV va a OTRAS.")),
+            reproducir=(f"Filtrar {sec.universo}, Año = {ctx.per.anio_actual} y es_tv = "
+                        f"VERDADERO. Sumar {config.COL_VALOR} y {sec.target} por «{sec.dim}»."),
+            notas=[f"Texto del PPT: {num(r.trp_total)} TRPS / {num(r.inv_total)} CLP"],
+            bloques=[
+                Bloque("Anillo interior: inversión en TV (SOS)", det[["inv"]], r.entidades,
+                       asig, "CLP", "columna", etiquetas_columnas=["Inversión TV (CLP)"]),
+                Bloque("Anillo exterior: TRPs (SOV)", det[["trp"]], r.entidades, asig, "TRP",
+                       "columna", etiquetas_columnas=["TRPs"]),
+            ])

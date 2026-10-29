@@ -108,12 +108,18 @@ class BloqueMensual:
     total: float
 
 
-def mensual(df: pd.DataFrame, anio: int, dim: str, valor: str, n: int,
-            orden_fijo: list[str] | None = None) -> BloqueMensual:
+def detalle_mensual(df: pd.DataFrame, anio: int, dim: str, valor: str) -> pd.DataFrame:
+    """Filas = meses 1..12, columnas = todas las entidades (antes de agrupar OTRAS)."""
     x = df[df[config.COL_ANIO] == anio]
     t = x.pivot_table(index=config.COL_MES, columns=dim, values=valor, aggfunc="sum")
     t = t.reindex(range(1, 13))
     t.columns.name = None
+    return t
+
+
+def mensual(df: pd.DataFrame, anio: int, dim: str, valor: str, n: int,
+            orden_fijo: list[str] | None = None) -> BloqueMensual:
+    t = detalle_mensual(df, anio, dim, valor)
     if orden_fijo is None:
         tot = t.sum().sort_values(ascending=False)
         keep = [e for e in tot[tot > 0].index if e != config.OTRAS][:n]
@@ -131,22 +137,43 @@ def variacion_mensual(df: pd.DataFrame, per: Periodos, valor: str
     Para el mes en curso se compara contra el tramo comparable del año anterior
     (no contra el mes completo), igual que el total.
     """
+    comp, act_tot, base_tot = componentes_variacion(df, per, valor)
+    var = {}
+    for m, fila in comp.iterrows():
+        if not fila["aplica"]:
+            var[m] = None
+            continue
+        var[m] = (fila["actual"] / fila["base"] - 1) if fila["base"] > 0 else None
+    tot = (act_tot / base_tot - 1) if base_tot > 0 else None
+    return pd.Series(var), tot
+
+
+def componentes_variacion(df: pd.DataFrame, per: Periodos, valor: str
+                          ) -> tuple[pd.DataFrame, float, float]:
+    """Insumos de la fila "Var.% año anterior".
+
+    Devuelve (tabla por mes, total año actual, base YTD comparable año anterior).
+    La tabla tiene: ``actual``, ``base`` (mes completo del año anterior, salvo el
+    último mes con datos, que usa solo el tramo comparable), ``tipo_base`` y
+    ``aplica`` (False para meses posteriores al último con datos).
+    """
     anio = df[config.COL_ANIO]
     act = df[anio == per.anio_actual].groupby(config.COL_MES)[valor].sum()
     ant_full = df[anio == per.anio_anterior].groupby(config.COL_MES)[valor].sum()
     ant_ytd = df[(anio == per.anio_anterior) & df["ytd"]].groupby(config.COL_MES)[valor].sum()
     ult_mes = int(act[act > 0].index.max()) if (act > 0).any() else 0
-    var = {}
+    filas = []
     for m in range(1, 13):
-        if m > ult_mes:
-            var[m] = None
-            continue
-        base = ant_ytd.get(m, 0.0) if m == ult_mes else ant_full.get(m, 0.0)
-        a = act.get(m, 0.0)
-        var[m] = (a / base - 1) if base > 0 else None
-    base_tot = ant_ytd.sum()
-    tot = (act.sum() / base_tot - 1) if base_tot > 0 else None
-    return pd.Series(var), tot
+        parcial = m == ult_mes
+        filas.append({
+            "mes": m,
+            "actual": float(act.get(m, 0.0)),
+            "base": float(ant_ytd.get(m, 0.0) if parcial else ant_full.get(m, 0.0)),
+            "tipo_base": ("Tramo comparable (mes en curso)" if parcial
+                          else "Mes completo" if m < ult_mes else "—"),
+            "aplica": m <= ult_mes,
+        })
+    return pd.DataFrame(filas).set_index("mes"), float(act.sum()), float(ant_ytd.sum())
 
 
 def share_mensual(df: pd.DataFrame, per: Periodos, dim: str, valor: str, n: int,
@@ -155,6 +182,16 @@ def share_mensual(df: pd.DataFrame, per: Periodos, dim: str, valor: str, n: int,
 
     Devuelve valores absolutos; las filas YTD van al final.
     """
+    t = detalle_share_mensual(df, per, dim, valor)
+    ytd_filas = [f"YTD {per.anio_anterior}", f"YTD {per.anio_actual}"]
+    keep = [] if orden_fijo else ranking(t, n, ytd_filas)
+    t = con_otras(t, keep, orden_fijo)
+    return t.where(t.abs() > 1e-9)
+
+
+def detalle_share_mensual(df: pd.DataFrame, per: Periodos, dim: str, valor: str
+                          ) -> pd.DataFrame:
+    """Meses + YTD (filas) por todas las entidades (columnas), antes de agrupar."""
     anio = df[config.COL_ANIO]
     x = df[anio.isin([per.anio_anterior, per.anio_actual])].copy()
     x["mes_lbl"] = (x[config.COL_MES].map(lambda m: config.MESES_CORTOS[m - 1].lower())
@@ -169,9 +206,7 @@ def share_mensual(df: pd.DataFrame, per: Periodos, dim: str, valor: str, n: int,
                                                 f"YTD {per.anio_actual}"]]
     t = pd.concat([t, ytd])
     t.columns.name = None
-    keep = [] if orden_fijo else ranking(t, n, list(ytd.index))
-    t = con_otras(t, keep, orden_fijo)
-    return t.where(t.abs() > 1e-9)
+    return t
 
 
 # --------------------------------------------------------------------------- #
@@ -184,17 +219,26 @@ class BloqueMix:
     totales: pd.Series       # inversión total por fila
 
 
-def mix_medios(df: pd.DataFrame, per: Periodos, dim: str, n: int,
-               orden_fijo: list[str] | None = None) -> list[BloqueMix]:
+def detalle_mix(df: pd.DataFrame, per: Periodos, dim: str) -> dict[str, pd.DataFrame]:
+    """Por bloque (TT anterior, YTD actual): entidades x medios en CLP, sin agrupar."""
     x = periodo_de(df, per)
-    bloques = []
+    out = {}
     for etiqueta in (f"TT {per.anio_anterior}", f"YTD {per.anio_actual}"):
         p = x[x["periodo"] == etiqueta]
         if p.empty:
             continue
         t = p.pivot_table(index=dim, columns="medio_grp", values="inv", aggfunc="sum")
         t = t.reindex(columns=config.ORDEN_MEDIOS).fillna(0)
-        t = t[t.sum(axis=1) > 0]
+        t.columns.name = None
+        out[etiqueta] = t[t.sum(axis=1) > 0]
+    return out
+
+
+def mix_medios(df: pd.DataFrame, per: Periodos, dim: str, n: int,
+               orden_fijo: list[str] | None = None) -> list[BloqueMix]:
+    bloques = []
+    for etiqueta, t in detalle_mix(df, per, dim).items():
+        t = t.copy()
         if orden_fijo is not None:
             t = t.reindex([e for e in orden_fijo if e in t.index])
         else:
@@ -222,10 +266,17 @@ class SosSov:
     inv_total: float
 
 
-def sos_vs_sov(df: pd.DataFrame, per: Periodos, dim: str, target: str, n: int,
-               orden_fijo: list[str] | None = None) -> SosSov | None:
+def detalle_sos_sov(df: pd.DataFrame, per: Periodos, dim: str, target: str) -> pd.DataFrame:
+    """Inversión en TV (``inv``) y TRPs (``trp``) del año actual, por entidad."""
     x = df[(df[config.COL_ANIO] == per.anio_actual) & df["es_tv"]]
     g = x.groupby(dim).agg(inv=("inv", "sum"), trp=(target, "sum"))
+    g.index.name = None
+    return g
+
+
+def sos_vs_sov(df: pd.DataFrame, per: Periodos, dim: str, target: str, n: int,
+               orden_fijo: list[str] | None = None) -> SosSov | None:
+    g = detalle_sos_sov(df, per, dim, target)
     if g.empty or g["trp"].sum() <= 0.5:
         return None
     if orden_fijo is not None:
